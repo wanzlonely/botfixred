@@ -1,1059 +1,476 @@
 import { Telegraf, Markup } from 'telegraf';
-import makeWASocket, { useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } from "@whiskeysockets/baileys";
+import makeWASocket, { useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, makeCacheableSignalKeyStore, delay } from "@whiskeysockets/baileys";
 import P from "pino";
-import qrcode from 'qrcode';
 import fs from 'fs';
 import nodemailer from 'nodemailer';
+import axios from 'axios';
+import path from 'path';
 import csv from 'csv-parser';
 import XLSX from 'xlsx';
 import { PassThrough } from 'stream';
-import axios from 'axios';
 
-// Import konfigurasi dari config.js
-import {
-  TELEGRAM_BOT_TOKEN,
-  OWNER_ID,
-  GROUP_LINK,
-  VERIFICATION_GROUP_ID,
-  WHATSAPP_EMAIL,
-  EMAIL_SENDER,
-  EMAIL_PASSWORD,
-  COOLDOWN_DURATION,
-  COOLDOWN_TIME,
-  MAX_RECONNECT_ATTEMPTS,
-  MT_FILE,
-  PREMIUM_FILE,
-  USER_DB,
-  HISTORY_DB,
-  BANNED_GROUP_DB,
-  SETTINGS_DB,
-  ALLOWED_FILE,
-  ADMIN_FILE,
-  RANDOM_NAMES,
-  APPEAL_MESSAGES
-} from './config.js';
+const CONFIG = {
+    botToken: '8250992727:AAG2XlCefa-XZPLw9KlaexgnPI0bx-nZ6uE',
+    ownerId: '7732520601',
+    groupLink: 'https://t.me/stockwalzy',
+    groupId: '-1003325663954',
+    botImage: 'https://files.catbox.moe/hrtpys.jpg',
+    dbPath: './database',
+    trialDuration: 86400000,
+    batchSize: 50,
+    delayPerBatch: 2000
+};
 
-// Inisialisasi bot Telegram
-const bot = new Telegraf(TELEGRAM_BOT_TOKEN);
+const RANDOM_NAMES = ["Andi", "Budi", "Citra", "Dewi", "Eko", "Fajar", "Gita", "Hendra", "Indah", "Joko", "Kartika", "Lestari", "Maya", "Nanda"];
+const APPEAL_MESSAGES = [
+    "Halo Tim WA, nomor saya {nomor} tidak bisa diakses. Mohon bantuannya.",
+    "Kepada Support WhatsApp, tolong pulihkan nomor {nomor} saya. Ini nomor penting.",
+    "Hello WhatsApp, my number {nomor} is banned by mistake. Please recover it.",
+    "Saya pemilik nomor {nomor}, mohon tinjau ulang pemblokiran ini. Terima kasih."
+];
 
-// Variabel untuk koneksi WhatsApp
-let whatsappSock = null;
-let isWhatsAppConnected = false;
-let reconnectAttempts = 0;
-let qrCodeString = '';
-
-// Data storage
-let allowedIds = [];
-let adminIds = [];
-
-// Cooldown system - GLOBAL 1000 DETIK
-const userCooldowns = new Map();
-
-// ========== FUNGSI UTILITAS ==========
-
-// Inisialisasi file database
-function initDbFile(filePath, defaultData) {
-  if (!fs.existsSync(filePath)) {
-    fs.writeFileSync(filePath, JSON.stringify(defaultData, null, 4), 'utf8');
-  }
-}
-
-// Load data dari file
-function loadData() {
-  try {
-    const rawAllowed = fs.readFileSync(ALLOWED_FILE, 'utf8');
-    allowedIds = JSON.parse(rawAllowed);
-    console.log(`✅ Loaded ${allowedIds.length} allowed IDs`);
-  } catch (e) {
-    console.log('❌ allowed.json tidak ada, mulai dengan list empty');
-    allowedIds = [];
-  }
-
-  try {
-    const rawAdmin = fs.readFileSync(ADMIN_FILE, 'utf8');
-    adminIds = JSON.parse(rawAdmin);
-    console.log(`✅ Loaded ${adminIds.length} admin IDs`);
-  } catch (e) {
-    console.log('❌ admin.json tidak ada, mulai dengan list empty');
-    adminIds = [];
-  }
-}
-
-// Helper functions
-function saveAllowed() {
-  try {
-    fs.writeFileSync(ALLOWED_FILE, JSON.stringify(allowedIds, null, 2), 'utf8');
-  } catch (e) {
-    console.error('❌ Gagal simpan allowed.json', e);
-  }
-}
-
-function saveAdmin() {
-  try {
-    fs.writeFileSync(ADMIN_FILE, JSON.stringify(adminIds, null, 2), 'utf8');
-  } catch (e) {
-    console.error('❌ Gagal simpan admin.json', e);
-  }
-}
-
-function isOwner(userId) {
-  return userId === OWNER_ID;
-}
-
-function isAdmin(userId) {
-  return isOwner(userId) || adminIds.includes(userId);
-}
-
-function isAllowed(userId) {
-  return isAdmin(userId) || allowedIds.includes(userId);
-}
-
-// Cooldown system - GLOBAL 1000 DETIK
-function checkCooldown(userId) {
-  if (isAdmin(userId)) return { allowed: true, remaining: 0 };
-  
-  const now = Date.now();
-  const lastUsed = userCooldowns.get(userId);
-  
-  if (lastUsed) {
-    const timePassed = now - lastUsed;
-    if (timePassed < COOLDOWN_TIME) {
-      const remaining = Math.ceil((COOLDOWN_TIME - timePassed) / 1000);
-      return { 
-        allowed: false, 
-        remaining 
-      };
+class Database {
+    constructor() {
+        if (!fs.existsSync(CONFIG.dbPath)) fs.mkdirSync(CONFIG.dbPath, { recursive: true });
+        this.paths = {
+            users: path.join(CONFIG.dbPath, 'users.json'),
+            admins: path.join(CONFIG.dbPath, 'admins.json'),
+            allowed: path.join(CONFIG.dbPath, 'allowed.json'),
+            templates: path.join(CONFIG.dbPath, 'templates.json'),
+            stats: path.join(CONFIG.dbPath, 'stats.json')
+        };
+        this.init();
     }
-  }
-  
-  userCooldowns.set(userId, now);
-  return { allowed: true, remaining: 0 };
+
+    init() {
+        const defaults = {
+            users: {},
+            admins: [String(CONFIG.ownerId)],
+            allowed: [],
+            templates: [{ id: 1, subject: "Masalah Login", body: "Halo Tim WA, nomor {nomor} bermasalah." }],
+            stats: { checked: 0, fixed: 0 }
+        };
+        for (const [key, p] of Object.entries(this.paths)) {
+            if (!fs.existsSync(p)) fs.writeFileSync(p, JSON.stringify(defaults[key], null, 2));
+        }
+    }
+
+    get(key) { try { return JSON.parse(fs.readFileSync(this.paths[key], 'utf8')); } catch { return null; } }
+    set(key, data) { fs.writeFileSync(this.paths[key], JSON.stringify(data, null, 2)); }
+
+    get users() { return this.get('users') || {}; }
+    get admins() { return this.get('admins') || []; }
+    get allowed() { return this.get('allowed') || []; }
+    get templates() { return this.get('templates') || []; }
+    get stats() { return this.get('stats') || { checked: 0, fixed: 0 }; }
+
+    updateUser(id, data) {
+        const u = this.users;
+        u[id] = { ...(u[id] || {}), ...data };
+        this.set('users', u);
+    }
+    updateStats(key, val) { const s = this.stats; s[key] += val; this.set('stats', s); }
 }
 
-function getRandomName() {
-  return RANDOM_NAMES[Math.floor(Math.random() * RANDOM_NAMES.length)];
-}
+const db = new Database();
+const bot = new Telegraf(CONFIG.botToken, { handlerTimeout: 9000000 });
+const userSessions = new Map();
+const userStates = new Map();
+const tempStorage = new Map();
 
-function getRandomAppealMessage(name, number) {
-  const randomIndex = Math.floor(Math.random() * APPEAL_MESSAGES.length);
-  return APPEAL_MESSAGES[randomIndex]
-    .replace('(NAME)', name)
-    .replace('+NUMBER', number);
-}
-
-// Helper untuk cek nomor repe (nomor bagus)
 function isRepeNumber(number) {
-  const numStr = number.toString();
-  if (/(\d)\1{2,}/.test(numStr)) return true;
-  
-  const digits = numStr.split('').map(Number);
-  let sequentialUp = true;
-  let sequentialDown = true;
-  
-  for (let i = 1; i < digits.length; i++) {
-    if (digits[i] !== digits[i-1] + 1) sequentialUp = false;
-    if (digits[i] !== digits[i-1] - 1) sequentialDown = false;
-  }
-  
-  if (sequentialUp || sequentialDown) return true;
-  if (numStr === numStr.split('').reverse().join('')) return true;
-  
-  if (numStr.length % 2 === 0) {
-    const half = numStr.length / 2;
-    if (numStr.slice(0, half) === numStr.slice(half)) return true;
-  }
-  
-  return false;
-}
-
-function getVerificationPercentage(number) {
-  const numStr = number.toString();
-  if (isRepeNumber(number)) return 99;
-  if (/(\d)\1{3,}/.test(numStr)) return 95;
-  if (/(\d)\1{2,}/.test(numStr)) return 90;
-  
-  const digits = numStr.split('').map(Number);
-  let sequentialUp = true;
-  let sequentialDown = true;
-  
-  for (let i = 1; i < digits.length; i++) {
-    if (digits[i] !== digits[i-1] + 1) sequentialUp = false;
-    if (digits[i] !== digits[i-1] - 1) sequentialDown = false;
-  }
-  
-  if (sequentialUp || sequentialDown) return 85;
-  
-  if (numStr.length >= 6) {
-    if (numStr.length % 2 === 0) {
-      const half = numStr.length / 2;
-      if (numStr.slice(0, half) === numStr.slice(half)) return 80;
+    const n = number.toString();
+    if (/(\d)\1{2,}/.test(n)) return true;
+    const d = n.split('').map(Number);
+    let up = true, down = true;
+    for (let i = 1; i < d.length; i++) {
+        if (d[i] !== d[i-1] + 1) up = false;
+        if (d[i] !== d[i-1] - 1) down = false;
     }
-    if (/(\d)\1(\d)\2(\d)\3/.test(numStr)) return 75;
-  }
-  
-  if (numStr.length >= 12) return 70;
-  if (numStr.length >= 10) return 60;
-  if (numStr.length >= 8) return 50;
-  
-  return 40;
+    return up || down || n === n.split('').reverse().join('');
 }
 
-// Fungsi untuk menghitung persentase "tidak ngejam"
-function getJamPercentage(bio, setAt, metaBusiness) {
-  let basePercentage = 50;
-  
-  // Faktor berdasarkan panjang bio
-  if (bio && bio.length > 0) {
-    if (bio.length > 100) basePercentage -= 20;
-    else if (bio.length > 50) basePercentage -= 15;
-    else if (bio.length > 20) basePercentage -= 10;
-    else basePercentage -= 5;
-  } else {
-    basePercentage += 15;
-  }
-  
-  // Faktor berdasarkan usia bio
-  if (setAt) {
-    const now = new Date();
-    const bioDate = new Date(setAt);
-    const diffTime = Math.abs(now - bioDate);
-    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-    
-    if (diffDays < 30) basePercentage -= 20;
-    else if (diffDays < 90) basePercentage -= 10;
-    else if (diffDays > 365) basePercentage += 15;
-    else if (diffDays > 730) basePercentage += 25;
-  } else {
-    basePercentage += 10;
-  }
-  
-  // Faktor Meta Business
-  if (metaBusiness) {
-    basePercentage -= 25;
-  }
-  
-  // Pastikan dalam range 10-90%
-  basePercentage = Math.max(10, Math.min(90, basePercentage));
-  
-  // Bulatkan ke kelipatan 10 terdekat
-  return Math.round(basePercentage / 10) * 10;
-}
-
-// Fungsi untuk membuat progress bar
-function createProgressBar(current, total, length = 20) {
-  const percentage = current / total;
-  const filledLength = Math.round(length * percentage);
-  const emptyLength = length - filledLength;
-  
-  const filledBar = '█'.repeat(filledLength);
-  const emptyBar = '░'.repeat(emptyLength);
-  
-  return `[${filledBar}${emptyBar}]`;
-}
-
-// ========== FUNGSI BARU UNTUK CEK META BUSINESS ==========
-
-// Fungsi untuk mengecek apakah nomor terdaftar Meta Business
-async function checkMetaBusiness(jid) {
-  try {
-    // Cek business profile
-    const businessProfile = await whatsappSock.getBusinessProfile(jid);
-    if (businessProfile) {
-      return {
-        isBusiness: true,
-        businessData: businessProfile
-      };
-    }
-    return { isBusiness: false, businessData: null };
-  } catch (error) {
-    return { isBusiness: false, businessData: null };
-  }
-}
-
-// Fungsi untuk membuat file TXT hasil cek bio
-function createBioResultFile(results, totalNumbers, sourceType = 'Input Manual') {
-  const timestamp = Date.now();
-  const filename = `hasil_cekbio_${timestamp}.txt`;
-  
-  let fileContent = `HASIL CEK BIO SEMUA USER\n\n`;
-  
-  const withBio = results.filter(r => r.registered && r.bio && r.bio.length > 0);
-  const withoutBio = results.filter(r => r.registered && (!r.bio || r.bio.length === 0));
-  const notRegistered = results.filter(r => !r.registered);
-  
-  fileContent += `✅ Total nomor dicek : ${totalNumbers}\n`;
-  fileContent += `📳 Dengan Bio       : ${withBio.length}\n`;
-  fileContent += `📵 Tanpa Bio        : ${withoutBio.length}\n`;
-  fileContent += `🚫 Tidak Terdaftar  : ${notRegistered.length}\n`;
-  fileContent += `📁 Sumber Data      : ${sourceType}\n\n`;
-  fileContent += '----------------------------------------\n\n';
-  
-  // Kelompokkan dengan bio berdasarkan tahun
-  if (withBio.length > 0) {
-    fileContent += `✅ NOMOR YANG ADA BIO NYA (${withBio.length})\n\n`;
-    
-    // Kelompokkan berdasarkan tahun
-    const groupedByYear = {};
-    withBio.forEach(result => {
-      if (result.setAt) {
-        const year = new Date(result.setAt).getFullYear();
-        if (!groupedByYear[year]) {
-          groupedByYear[year] = [];
-        }
-        groupedByYear[year].push(result);
-      } else {
-        if (!groupedByYear['Tidak Diketahui']) {
-          groupedByYear['Tidak Diketahui'] = [];
-        }
-        groupedByYear['Tidak Diketahui'].push(result);
-      }
-    });
-    
-    const sortedYears = Object.keys(groupedByYear).sort((a, b) => {
-      if (a === 'Tidak Diketahui') return 1;
-      if (b === 'Tidak Diketahui') return -1;
-      return parseInt(a) - parseInt(b);
-    });
-    
-    sortedYears.forEach(year => {
-      fileContent += `Tahun ${year}\n\n`;
-      
-      groupedByYear[year].forEach((result, index) => {
-        fileContent += `└─ 📅 ${result.number}\n`;
-        fileContent += `   └─ 📝 "${result.bio}"\n`;
-        
-        if (result.setAt) {
-          const date = new Date(result.setAt);
-          const dateStr = date.toLocaleDateString('id-ID', {
-            day: '2-digit', month: '2-digit', year: 'numeric'
-          });
-          const timeStr = date.toLocaleTimeString('id-ID', {
-            hour: '2-digit', minute: '2-digit', second: '2-digit'
-          });
-          fileContent += `      └─ ⏰ ${dateStr}, ${timeStr}\n`;
-        }
-        
-        if (result.metaBusiness) {
-          fileContent += `      └─ ✅ Nomor Ini Terdaftar Meta Business\n`;
-        } else {
-          fileContent += `      └─ ❌ Nomor Ini Tidak Ada Meta Businesses\n`;
-        }
-        
-        const jamPercentage = result.jamPercentage || getJamPercentage(result.bio, result.setAt, result.metaBusiness);
-        fileContent += `      └─ Untuk Nomor Ini 📮 ${jamPercentage}% Tidak Ngejam\n`;
-        
-        fileContent += '\n';
-      });
-    });
-    
-    fileContent += '----------------------------------------\n\n';
-  }
-  
-  if (withoutBio.length > 0) {
-    fileContent += `📵 NOMOR TANPA BIO / PRIVASI (${withoutBio.length})\n\n`;
-    withoutBio.forEach((result, index) => {
-      fileContent += `${result.number}\n`;
-      if (result.metaBusiness) {
-        fileContent += `└─ ✅ Nomor Ini Terdaftar Meta Business\n`;
-      } else {
-        fileContent += `└─ ❌ Nomor Ini Tidak Ada Meta Businesses\n`;
-      }
-      const jamPercentage = result.jamPercentage || getJamPercentage(result.bio, result.setAt, result.metaBusiness);
-      fileContent += `└─ Untuk Nomor Ini 📮 ${jamPercentage}% Tidak Ngejam\n`;
-      fileContent += '\n';
-    });
-    fileContent += '\n----------------------------------------\n\n';
-  }
-  
-  if (notRegistered.length > 0) {
-    fileContent += `🚫 NOMOR TIDAK TERDAFTAR (${notRegistered.length})\n\n`;
-    notRegistered.forEach((result, index) => {
-      fileContent += `${result.number}\n`;
-    });
-  }
-  
-  fs.writeFileSync(filename, fileContent, 'utf8');
-  return filename;
-}
-
-// Fungsi untuk membuat file TXT hasil cek nokos repe
-function createRepeResultFile(registeredRepe, notRegisteredRepe, notRepeNumbers) {
-  const timestamp = Date.now();
-  const filename = `repe_result_${timestamp}.txt`;
-  
-  let fileContent = `📚 Hasil cek repe\n\n`;
-  
-  if (registeredRepe.length > 0) {
-    fileContent += `Nokos Repe yang terdaftar\n`;
-    registeredRepe.forEach((item, index) => {
-      fileContent += `✅ ${index + 1}. ${item.number}\n`;
-    });
-    fileContent += '\n';
-  }
-  
-  if (notRegisteredRepe.length > 0) {
-    fileContent += `Nokos Repe yang tidak terdaftar\n`;
-    notRegisteredRepe.forEach((number, index) => {
-      fileContent += `❌ ${index + 1}. ${number}\n`;
-    });
-    fileContent += '\n';
-  }
-
-  if (notRepeNumbers.registered.length > 0) {
-    fileContent += `Nomor biasa yang terdaftar\n`;
-    notRepeNumbers.registered.forEach((number, index) => {
-      fileContent += `📱 ${index + 1}. ${number}\n`;
-    });
-    fileContent += '\n';
-  }
-
-  if (notRepeNumbers.notRegistered.length > 0) {
-    fileContent += `Nomor biasa yang tidak terdaftar\n`;
-    notRepeNumbers.notRegistered.forEach((number, index) => {
-      fileContent += `🚫 ${index + 1}. ${number}\n`;
-    });
-  }
-  
-  fs.writeFileSync(filename, fileContent, 'utf8');
-  return filename;
-}
-
-// ========== SISTEM EMAIL & MT ==========
-
-// Inisialisasi semua file database
-function initAllDb() {
-  initDbFile(MT_FILE, []);
-  initDbFile(PREMIUM_FILE, []);
-  initDbFile(USER_DB, {});
-  initDbFile(HISTORY_DB, []);
-  initDbFile(BANNED_GROUP_DB, []);
-  initDbFile('groups.json', {});
-  initDbFile('owners.json', [OWNER_ID]);
-  initDbFile('emails.json', []);
-  initDbFile(SETTINGS_DB, {
-    cooldown_duration: 60000,
-    global_cooldown: 0,
-    active_mt_id: 0,
-    active_email_id: 0
-  });
-}
-
-// Baca database
-function readDb(file) {
-  try {
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch (e) {
-    return {};
-  }
-}
-
-// Tulis database
-function writeDb(file, data) {
-  fs.writeFileSync(file, JSON.stringify(data, null, 4), 'utf8');
-}
-
-// Dapatkan MT texts
-function getMtTexts() {
-  return readDb(MT_FILE);
-}
-
-// Dapatkan MT text by ID
-function getMtTextById(id) {
-  return getMtTexts().find(mt => mt.id === id);
-}
-
-// Dapatkan active MT
-function getActiveMt() {
-  const settings = readDb(SETTINGS_DB);
-  const activeId = settings.active_mt_id || 0;
-  return getMtTextById(activeId);
-}
-
-// Setup email transporter
-function setupTransporter() {
-  const settings = readDb(SETTINGS_DB);
-  const emails = readDb('emails.json');
-  
-  let emailUser = EMAIL_SENDER;
-  let emailPass = EMAIL_PASSWORD;
-  
-  if (settings.active_email_id !== 0) {
-    const activeEmail = emails.find(e => e.id === settings.active_email_id);
-    if (activeEmail) {
-      emailUser = activeEmail.email;
-      emailPass = activeEmail.app_pass;
-    }
-  }
-  
-  return nodemailer.createTransport({
-    host: 'smtp.gmail.com',
-    port: 587,
-    secure: false,
-    requireTLS: true,
-    auth: {
-      user: emailUser,
-      pass: emailPass
+const FileHandler = {
+    async readTxt(buffer) {
+        return buffer.toString('utf8').split(/[\r\n]+/).filter(n => n.trim().length > 0);
     },
-    timeout: 30000,
-    connectionTimeout: 30000,
-    socketTimeout: 30000,
-    tls: {
-      rejectUnauthorized: false
-    }
-  });
-}
-
-// Dapatkan user data
-function getUser(userId) {
-  const users = readDb(USER_DB);
-  const defaultUser = {
-    id: userId,
-    username: 'N/A',
-    status: isOwner(userId) ? 'owner' : 'free',
-    is_banned: 0,
-    last_fix: 0,
-    fix_limit: 10,
-    referral_points: 0,
-    referred_by: null,
-    referred_users: []
-  };
-  return users[userId] ? { ...defaultUser, ...users[userId] } : defaultUser;
-}
-
-// Simpan user data
-function saveUser(user) {
-  const users = readDb(USER_DB);
-  users[user.id] = user;
-  writeDb(USER_DB, users);
-}
-
-// Simpan history
-function saveHistory(data) {
-  const history = readDb(HISTORY_DB);
-  const newId = history.length > 0 ? history[history.length - 1].id + 1 : 1;
-  history.push({ id: newId, ...data, timestamp: new Date().toISOString() });
-  writeDb(HISTORY_DB, history);
-}
-
-// ========== KONEKSI WHATSAPP DENGAN QR CODE & PAIRING ==========
-
-// Koneksi WhatsApp dengan QR Code
-async function startWhatsApp() {
-  try {
-    if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-      console.log('❌ Gagal reconnect WhatsApp setelah beberapa percobaan. Silakan restart bot.');
-      return;
-    }
-
-    reconnectAttempts++;
-    console.log('🔄 Menghubungkan ke WhatsApp...');
-    const { state, saveCreds } = await useMultiFileAuthState("auth");
-    const { version } = await fetchLatestBaileysVersion();
-
-    whatsappSock = makeWASocket({
-      version,
-      auth: state,
-      printQRInTerminal: false, // UBAH KE FALSE AGAR TIDAK DEPRECATED WARNING
-      logger: P({ level: "silent" }),
-      connectTimeoutMs: 60000,
-      keepAliveIntervalMs: 10000,
-      browser: ["Ubuntu", "Chrome", "20.0.04"],
-      generateHighQualityLinkPreview: true,
-    });
-
-    whatsappSock.ev.on("connection.update", async (update) => {
-      const { connection, lastDisconnect, qr } = update;
-      
-      if (qr) {
-        qrCodeString = qr;
-        console.log('📱 QR Code diterima, tunggu perintah /getqr untuk mengirim...');
-      }
-
-      if (connection === "close") {
-        const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-        console.log("❌ Koneksi WhatsApp terputus:", lastDisconnect?.error);
-        
-        if (shouldReconnect) {
-          console.log("🔄 WhatsApp terputus, menghubungkan ulang...");
-          isWhatsAppConnected = false;
-          setTimeout(() => startWhatsApp(), 5000);
-        } else {
-          console.log("❌ WhatsApp logged out, perlu scan QR code baru.");
-          isWhatsAppConnected = false;
-          if (fs.existsSync("./auth")) {
-            fs.rmSync("./auth", { recursive: true });
-          }
-          setTimeout(() => startWhatsApp(), 3000);
-        }
-      } else if (connection === "open") {
-        isWhatsAppConnected = true;
-        reconnectAttempts = 0;
-        qrCodeString = '';
-        console.log(`✅ WhatsApp terhubung sebagai ${whatsappSock.user.id}`);
-        
-        try {
-          await bot.telegram.sendMessage(OWNER_ID, 
-            `✅ *WhatsApp Berhasil Terhubung!*\n\n` +
-            `📱 *User ID:* ${whatsappSock.user.id}\n` +
-            `👤 *Nama:* ${whatsappSock.user.name || 'Tidak ada nama'}\n` +
-            `🔗 *Status:* Connected`,
-            { parse_mode: 'Markdown' }
-          );
-        } catch (error) {
-          console.error('Gagal kirim notifikasi ke owner:', error);
-        }
-      }
-    });
-
-    whatsappSock.ev.on("creds.update", saveCreds);
-
-  } catch (error) {
-    console.error('❌ Error saat menghubungkan WhatsApp:', error);
-    setTimeout(() => startWhatsApp(), 10000);
-  }
-}
-
-// ========== FUNGSI FILE & DOWNLOADER ==========
-
-async function readTxtFile(fileBuffer) {
-  const content = fileBuffer.toString('utf8');
-  return content.split(/[\r\n]+/).filter(num => num.trim().length > 0);
-}
-
-async function readCsvFile(fileBuffer) {
-  return new Promise((resolve, reject) => {
-    const numbers = [];
-    const bufferStream = new PassThrough();
-    bufferStream.end(fileBuffer);
-    
-    bufferStream
-      .pipe(csv())
-      .on('data', (row) => {
-        Object.values(row).forEach(value => {
-          if (value && value.toString().trim().length > 0) {
-            numbers.push(value.toString().trim());
-          }
+    async readCsv(buffer) {
+        return new Promise((resolve, reject) => {
+            const numbers = [];
+            const stream = new PassThrough();
+            stream.end(buffer);
+            stream.pipe(csv())
+                .on('data', (row) => Object.values(row).forEach(v => { if (v && v.toString().trim().length > 0) numbers.push(v.toString().trim()); }))
+                .on('end', () => resolve(numbers))
+                .on('error', reject);
         });
-      })
-      .on('end', () => resolve(numbers))
-      .on('error', (error) => reject(error));
-  });
-}
+    },
+    async readXlsx(buffer) {
+        const workbook = XLSX.read(buffer, { type: 'buffer' });
+        const numbers = [];
+        workbook.SheetNames.forEach(name => {
+            const sheet = workbook.Sheets[name];
+            const data = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+            data.flat().forEach(v => { if (v && v.toString().trim().length > 0) numbers.push(v.toString().trim()); });
+        });
+        return numbers;
+    },
+    async process(buffer, fileName) {
+        const ext = fileName.toLowerCase().split('.').pop();
+        if (ext === 'txt') return await this.readTxt(buffer);
+        if (ext === 'csv') return await this.readCsv(buffer);
+        if (ext === 'xlsx') return await this.readXlsx(buffer);
+        throw new Error('Format file tidak didukung (Gunakan .txt, .csv, atau .xlsx)');
+    }
+};
 
-async function readXlsxFile(fileBuffer) {
-  const workbook = XLSX.read(fileBuffer, { type: 'buffer' });
-  const numbers = [];
-  workbook.SheetNames.forEach(sheetName => {
-    const worksheet = workbook.Sheets[sheetName];
-    const data = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
-    data.flat().forEach(value => {
-      if (value && value.toString().trim().length > 0) {
-        numbers.push(value.toString().trim());
-      }
-    });
-  });
-  return numbers;
-}
+const WAManager = {
+    async startUserSession(userId) {
+        const uid = String(userId);
+        const authPath = path.join(CONFIG.dbPath, `auth_user_${uid}`);
+        const { state, saveCreds } = await useMultiFileAuthState(authPath);
+        const { version } = await fetchLatestBaileysVersion();
 
-async function processFile(fileBuffer, fileName) {
-  const fileExtension = fileName.toLowerCase().split('.').pop();
-  switch (fileExtension) {
-    case 'txt': return await readTxtFile(fileBuffer);
-    case 'csv': return await readCsvFile(fileBuffer);
-    case 'xlsx': return await readXlsxFile(fileBuffer);
-    default: throw new Error(`Format file ${fileExtension} tidak didukung.`);
-  }
-}
+        const sock = makeWASocket({
+            version,
+            logger: P({ level: "silent" }),
+            printQRInTerminal: false,
+            auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, P({ level: "silent" })) },
+            browser: ["Ubuntu", "Chrome", "20.0.04"],
+            connectTimeoutMs: 60000,
+            markOnlineOnConnect: true
+        });
 
-function getFileSourceType(fileName) {
-  const ext = fileName.toLowerCase().split('.').pop();
-  switch (ext) {
-    case 'txt': return 'File TXT';
-    case 'csv': return 'File CSV';
-    case 'xlsx': return 'File XLSX';
-    default: return 'File';
-  }
-}
+        sock.ev.on("connection.update", async (update) => {
+            const { connection, lastDisconnect } = update;
+            if (connection === "close") {
+                if (userSessions.has(uid)) userSessions.delete(uid);
+                const code = lastDisconnect?.error?.output?.statusCode;
+                if (code === DisconnectReason.loggedOut) {
+                    this.deleteSession(uid);
+                } else {
+                    this.startUserSession(uid);
+                }
+            } else if (connection === "open") {
+                userSessions.set(uid, sock);
+                db.updateUser(uid, { sessionActive: true });
+                try { await bot.telegram.sendMessage(uid, `🔔 *WhatsApp Terhubung!*\nSesi Anda siap digunakan.`); } catch {}
+            }
+        });
 
-async function downloadTelegramFile(fileId, fileName) {
-  try {
-    const fileLink = await bot.telegram.getFileLink(fileId);
-    const response = await axios({
-      method: 'GET',
-      url: fileLink.href,
-      responseType: 'arraybuffer'
-    });
-    return Buffer.from(response.data);
-  } catch (error) {
-    console.error('Error downloading file:', error);
-    throw new Error(`Gagal mengunduh file: ${error.message}`);
-  }
-}
+        sock.ev.on("creds.update", saveCreds);
+        userSessions.set(uid, sock);
+        return sock;
+    },
 
-// ========== COMMAND TELEGRAM BOT (UI & LOGIC BARU) ==========
+    deleteSession(userId) {
+        const uid = String(userId);
+        userSessions.delete(uid);
+        const p = path.join(CONFIG.dbPath, `auth_user_${uid}`);
+        if (fs.existsSync(p)) fs.rmSync(p, { recursive: true, force: true });
+        db.updateUser(uid, { sessionActive: false });
+    },
 
-// 1. UPDATE: TAMPILAN /START DENGAN BUTTON
-bot.command('start', async (ctx) => {
-  const userId = ctx.message.from.id;
-  const user = getUser(userId);
-  
-  const isOwnerStatus = isOwner(userId);
-  const isAdminStatus = isAdmin(userId) && !isOwnerStatus;
-  const isPremium = user.status === 'premium';
+    async loadAll() {
+        const users = db.users;
+        for (const [uid, userData] of Object.entries(users)) {
+            if (userData.sessionActive) {
+                await this.startUserSession(uid);
+                await delay(1000);
+            }
+        }
+    }
+};
 
-  // Header Info
-  let text = `╭───── ⧼ 𝑰 𝒏 𝒇 𝒐 - 𝑩 𝒐 𝒕 𝒔 ⧽
-│ᴄʀᴇᴀᴛᴏʀ : ANA X FARID👾
-│ᴠᴇʀsɪ : ᴠ11.0
-│ᴛʏᴘᴇ : Case 
+const EmailEngine = {
+    send(user, targetNumber, template) {
+        if (!user.email || !user.emailPass) throw new Error("Email belum disetting.");
+        const transporter = nodemailer.createTransport({
+            host: 'smtp.gmail.com', port: 587, secure: false,
+            auth: { user: user.email, pass: user.emailPass },
+            tls: { rejectUnauthorized: false }
+        });
+        const body = template.body.replace(/{nomor}/g, targetNumber);
+        return transporter.sendMail({
+            from: user.email,
+            to: 'support@support.whatsapp.com',
+            subject: template.subject,
+            text: body
+        });
+    }
+};
+
+const checkAuth = async (ctx) => {
+    const uid = String(ctx.from.id);
+    let user = db.users[uid];
+    
+    // Auto Register jika user null
+    if (!user) {
+        user = { 
+            id: uid, username: ctx.from.username || 'User', 
+            joined: Date.now(), expired: Date.now() + CONFIG.trialDuration,
+            email: null, emailPass: null, sessionActive: false 
+        };
+        db.updateUser(uid, user);
+    }
+
+    const isOwner = uid === CONFIG.ownerId;
+    const isAdmin = db.admins.includes(uid);
+    const isAllowed = db.allowed.includes(uid);
+
+    if (isOwner || isAdmin || isAllowed) return true;
+
+    if (CONFIG.groupId !== '0') {
+        try {
+            const member = await ctx.telegram.getChatMember(CONFIG.groupId, uid);
+            if (['left', 'kicked'].includes(member.status)) {
+                await ctx.reply(`❌ *AKSES DITOLAK*\nSilakan join grup terlebih dahulu.`, {
+                    parse_mode: 'Markdown',
+                    reply_markup: { inline_keyboard: [[Markup.button.url('🚀 JOIN GRUP', CONFIG.groupLink)]] }
+                });
+                return false;
+            }
+        } catch {}
+    }
+
+    if (Date.now() > user.expired) {
+        await ctx.reply('⛔ *Masa Aktif Habis*\nHubungi Owner untuk perpanjangan.', {parse_mode:'Markdown'});
+        return false;
+    }
+    return true;
+};
+
+const UI = {
+    async send(ctx, text, buttons) {
+        try { await ctx.editMessageCaption(text, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: buttons } }); }
+        catch { try { await ctx.deleteMessage(); } catch {} await ctx.replyWithPhoto(CONFIG.botImage, { caption: text, parse_mode: 'Markdown', reply_markup: { inline_keyboard: buttons } }); }
+    },
+    async menu(ctx) {
+        const uid = String(ctx.from.id);
+        let u = db.users[uid];
+
+        // ANTI CRASH: Re-create user if missing
+        if (!u) {
+            u = { 
+                id: uid, username: ctx.from.username || 'User', 
+                joined: Date.now(), expired: Date.now() + CONFIG.trialDuration,
+                email: null, emailPass: null, sessionActive: false 
+            };
+            db.updateUser(uid, u);
+        }
+
+        const isOwner = uid === CONFIG.ownerId;
+        const isAdmin = db.admins.includes(uid);
+        const role = isOwner ? 'Owner' : (isAdmin ? 'Admin' : 'User');
+        const status = Date.now() > u.expired ? '🔴 Expired' : '🟢 Active';
+        
+        // Status WA & Email
+        const hasEmail = u.email ? '✅' : '❌';
+        const hasWA = userSessions.has(uid) && userSessions.get(uid)?.user ? '✅' : '❌';
+        
+        let text = `╭───── ⧼ 𝑰 𝒏 𝒇 𝒐 - 𝑩 𝒐 𝒕 𝒔 ⧽
+│🤖 𝐁𝐨𝐭 : Whatsapp Master V38
+│👤 𝐑𝐨𝐥𝐞 : ${role}
+│🎫 𝐒𝐭𝐚𝐭𝐮𝐬 : ${status}
 ╰─────
 ╭───── ⧼ 𝑺 𝒕 𝒂 𝒕 𝒖 𝒔 - 𝑼 𝒔 𝒆 𝒓 ⧽
-┃ *𖠂* *Owner* : ${isOwnerStatus ? '✅' : '❌'}
-┃ *𖠂* *Admin* : ${isAdminStatus ? '✅' : '❌'}
-┃ *𖠂* *Premium* : ${isPremium ? '✅' : '❌'}
+┃ 📧 Email: ${hasEmail}
+┃ 📱 WA: ${hasWA}
 ╰─────
-\n👋 Halo, silakan pilih menu di bawah ini untuk menggunakan bot:`;
+ ═══════════[ 𝙈𝙀𝙉𝙐 ]═══════════\n`;
 
-  // Inline Keyboard (Button)
-  const buttons = [];
-
-  if (isAllowed(userId)) {
-    // Baris 1: Fitur Utama
-    buttons.push([
-      Markup.button.callback('🔍 Cek Bio & File', 'menu_cek'),
-      Markup.button.callback('🔧 Fix & Banding', 'menu_fix')
-    ]);
-    
-    // Baris 2: Cek Range & Repe
-    buttons.push([
-      Markup.button.callback('📊 Cek Range', 'menu_range'),
-      Markup.button.callback('🔢 Cek Repe', 'menu_repe')
-    ]);
-
-    // Baris 3: Fitur Setup (Permintaan User)
-    if (isOwner(userId) || isAdmin(userId)) {
-        buttons.push([
-            Markup.button.callback('⚙️ Setup Template (MT)', 'menu_setup_mt')
-        ]);
-        buttons.push([
-            Markup.button.callback('👥 Menu Admin/Owner', 'menu_admin')
-        ]);
-    }
-
-  } else {
-    text += `\n\n❌ *Akses Ditolak!* Anda belum terverifikasi.\nSilakan join grup di bawah ini.`;
-    buttons.push([
-      Markup.button.url("✅ Join Grup Verifikasi", GROUP_LINK)
-    ]);
-    buttons.push([
-      Markup.button.callback("🔄 Cek Status Verifikasi", "check_verification")
-    ]);
-  }
-
-  // Footer credit
-  const footer = `\n\n© farid - ɢᴀɴᴛᴇɴɢɢ`;
-
-  // Kirim pesan
-  await ctx.reply(text + footer, { 
-      parse_mode: 'Markdown',
-      reply_markup: { inline_keyboard: buttons } 
-  });
-});
-
-// ========== ACTION HANDLERS (LOGIC UNTUK BUTTON) ==========
-
-// Back to Main Menu
-bot.action('back_to_menu', async (ctx) => {
-    try {
-        await ctx.deleteMessage(); // Hapus pesan lama biar bersih
-        // Panggil logic /start lagi (copy paste logic start di sini atau panggil func)
-        // Untuk simpel, kita reply text menu lagi
-        const userId = ctx.from.id;
         const buttons = [
-            [Markup.button.callback('🔍 Cek Bio & File', 'menu_cek'), Markup.button.callback('🔧 Fix & Banding', 'menu_fix')],
-            [Markup.button.callback('📊 Cek Range', 'menu_range'), Markup.button.callback('🔢 Cek Repe', 'menu_repe')]
+            [Markup.button.callback('🔧 Fix Menu', 'm_fix'), Markup.button.callback('🔍 Cek Menu', 'm_cek')],
+            [Markup.button.callback('⚙️ Setup Saya', 'm_myset'), Markup.button.callback('👤 Profil', 'm_prof')]
         ];
-        if (isOwner(userId) || isAdmin(userId)) {
-            buttons.push([Markup.button.callback('⚙️ Setup Template (MT)', 'menu_setup_mt')]);
-            buttons.push([Markup.button.callback('👥 Menu Admin/Owner', 'menu_admin')]);
+
+        if (isAdmin || isOwner) buttons.push([Markup.button.callback('🔐 Admin Panel', 'm_adm')]);
+        await UI.send(ctx, text, buttons);
+    }
+};
+
+const Back = [Markup.button.callback('🔙 Kembali', 'home')];
+
+bot.command('start', async (ctx) => { userStates.delete(String(ctx.from.id)); if (await checkAuth(ctx)) await UI.menu(ctx); });
+bot.action('home', async (ctx) => { userStates.delete(String(ctx.from.id)); await UI.menu(ctx); });
+bot.action('cancel', async (ctx) => { userStates.delete(String(ctx.from.id)); await ctx.answerCbQuery('Dibatalkan'); await UI.menu(ctx); });
+
+bot.action('m_fix', (ctx) => UI.send(ctx, `🔧 *MENU FIX*\n\nPilih metode:`, [[Markup.button.callback('🚀 Auto Email', 'a_fix_auto')], [Markup.button.callback('📝 Generate Teks', 'a_fix_man')], Back]));
+bot.action('m_cek', (ctx) => UI.send(ctx, `🔍 *MENU CEK*\n\nPilih alat pengecekan:`, [[Markup.button.callback('✍️ Cek Bio (Manual)', 'a_cek_man'), Markup.button.callback('📂 Cek Bio (File)', 'a_cek_file')], [Markup.button.callback('🔢 Cek Repe', 'a_cek_repe'), Markup.button.callback('📊 Cek Range', 'a_cek_range')], Back]));
+bot.action('m_myset', (ctx) => UI.send(ctx, `⚙️ *PENGATURAN SAYA*`, [[Markup.button.callback('📧 Set Email', 'my_set_email'), Markup.button.callback('📱 Connect WA', 'my_set_wa')], [Markup.button.callback('❌ Logout WA', 'my_del_wa')], Back]));
+bot.action('m_adm', (ctx) => UI.send(ctx, `🔐 *ADMIN PANEL*`, [[Markup.button.callback('📝 Set Template', 's_tm_set'), Markup.button.callback('➕ Add Time', 'u_add')], [Markup.button.callback('📋 List User', 'u_list')], Back]));
+bot.action('m_prof', (ctx) => { const u = db.users[String(ctx.from.id)]; UI.send(ctx, `👤 *PROFIL*\nID: \`${u.id}\`\nExp: ${new Date(u.expired).toLocaleDateString()}`, [Back]); });
+
+bot.action('my_set_email', (ctx) => { userStates.set(String(ctx.from.id), 'MY_SET_EMAIL'); UI.send(ctx, `📧 *SET EMAIL PRIBADI*\n\nKirim alamat Gmail Anda.`, [Back]); });
+bot.action('my_set_wa', async (ctx) => { await WAManager.startUserSession(ctx.from.id); userStates.set(String(ctx.from.id), 'MY_SET_WA_NUM'); UI.send(ctx, `📱 *CONNECT WHATSAPP*\n\nKirim Nomor HP Anda (Contoh: 628xxx).`, [Back]); });
+bot.action('my_del_wa', (ctx) => { WAManager.deleteSession(ctx.from.id); ctx.reply('✅ Sesi WhatsApp dihapus.'); });
+bot.action('a_fix_auto', (ctx) => { const u = db.users[String(ctx.from.id)]; if (!u.email) return ctx.answerCbQuery('❌ Setting email dulu!', { show_alert: true }); userStates.set(String(ctx.from.id), 'FIX_AUTO'); UI.send(ctx, `🚀 *AUTO FIX*\nKirim Nomor WA Target.`, [Back]); });
+bot.action('a_fix_man', (ctx) => { userStates.set(String(ctx.from.id), 'FIX_MAN'); UI.send(ctx, `📝 *GENERATE TEXT*\nKirim Nomor WA Target.`, [Back]); });
+bot.action('a_cek_man', (ctx) => { if (!userSessions.has(String(ctx.from.id))) return ctx.answerCbQuery('❌ WA belum konek!', { show_alert: true }); userStates.set(String(ctx.from.id), 'CEK_MAN'); UI.send(ctx, `✍️ *INPUT NOMOR*\nKirim nomor dipisahkan spasi/enter.`, [Back]); });
+bot.action('a_cek_file', (ctx) => { if (!userSessions.has(String(ctx.from.id))) return ctx.answerCbQuery('❌ WA belum konek!', { show_alert: true }); userStates.set(String(ctx.from.id), 'CEK_FILE'); UI.send(ctx, `📂 *UPLOAD FILE*\nKirim file .txt/.csv/.xlsx.`, [Back]); });
+bot.action('a_cek_repe', (ctx) => { if (!userSessions.has(String(ctx.from.id))) return ctx.answerCbQuery('❌ WA belum konek!', { show_alert: true }); userStates.set(String(ctx.from.id), 'CEK_REPE'); UI.send(ctx, `🔢 *CEK REPE*\nKirim list nomor.`, [Back]); });
+bot.action('a_cek_range', (ctx) => { if (!userSessions.has(String(ctx.from.id))) return ctx.answerCbQuery('❌ WA belum konek!', { show_alert: true }); userStates.set(String(ctx.from.id), 'CEK_RANGE'); UI.send(ctx, `📊 *CEK RANGE*\nFormat: Prefix Start End`, [Back]); });
+bot.action('s_tm_set', (ctx) => { userStates.set(String(ctx.from.id), 'SET_TM_SUBJ'); UI.send(ctx, `📝 *SET TEMPLATE*\nKirim Judul Email.`, [Back]); });
+bot.action('u_add', (ctx) => { userStates.set(String(ctx.from.id), 'ADM_TIME_ID'); UI.send(ctx, `➕ *ADD TIME*\nKirim ID User.`, [Back]); });
+bot.action('u_list', (ctx) => { const list = Object.values(db.users).map(u => `ID: ${u.id} (${u.username})`).join('\n'); if (list.length > 3000) { fs.writeFileSync('u.txt', list); ctx.replyWithDocument({ source: 'u.txt' }); fs.unlinkSync('u.txt'); } else UI.send(ctx, `👥 *USER LIST*\n\n${list}`, [Back]); });
+
+bot.command('addadmin', (ctx) => { if (String(ctx.from.id) !== CONFIG.ownerId) return; const id = ctx.message.text.split(' ')[1]; if (!id) return; const admins = db.admins; if (!admins.includes(id)) admins.push(id); db.set('admins', admins); ctx.reply(`✅ Admin ${id} ditambahkan.`); });
+bot.command('addkacung', (ctx) => { if (!db.admins.includes(String(ctx.from.id)) && String(ctx.from.id) !== CONFIG.ownerId) return; const id = ctx.message.text.split(' ')[1]; if (!id) return; const allowed = db.allowed; if (!allowed.includes(id)) allowed.push(id); db.set('allowed', allowed); ctx.reply(`✅ Kacung ${id} ditambahkan.`); });
+bot.command('listkacung', (ctx) => { if (!db.admins.includes(String(ctx.from.id)) && String(ctx.from.id) !== CONFIG.ownerId) return; ctx.reply(`📋 List Kacung:\n${db.allowed.join('\n')}`); });
+
+bot.on('message', async (ctx) => {
+    const uid = String(ctx.from.id);
+    const state = userStates.get(uid);
+    const text = ctx.message.text;
+    if (!state) return;
+
+    if (state === 'MY_SET_EMAIL') {
+        tempStorage.set(uid, { email: text.trim() });
+        userStates.set(uid, 'MY_SET_PASS');
+        ctx.reply('✅ Email diterima. Kirim *App Password*.');
+    } else if (state === 'MY_SET_PASS') {
+        db.updateUser(uid, { email: tempStorage.get(uid).email, emailPass: text.replace(/\s+/g, '') });
+        ctx.reply('✅ Email tersimpan!');
+        userStates.delete(uid);
+        UI.menu(ctx);
+    } else if (state === 'MY_SET_WA_NUM') {
+        const sock = userSessions.get(uid);
+        if (!sock) return ctx.reply('❌ Sesi Error.');
+        try {
+            const code = await sock.requestPairingCode(text.replace(/\D/g, ''));
+            ctx.reply(`🔢 Kode: \`${code}\``, { parse_mode: 'Markdown' });
+            userStates.delete(uid);
+        } catch(e) { ctx.reply(`Gagal: ${e.message}`); }
+    }
+
+    else if (state === 'SET_TM_SUBJ') {
+        tempStorage.set(uid, { s: text });
+        userStates.set(uid, 'SET_TM_BODY');
+        ctx.reply('✅ Judul oke. Kirim Isi Pesan ({nomor}).');
+    } else if (state === 'SET_TM_BODY') {
+        db.templates = [{ id: 1, subject: tempStorage.get(uid).s, body: text }];
+        ctx.reply('✅ Template Updated.');
+        userStates.delete(uid);
+        UI.menu(ctx);
+    }
+
+    else if (state === 'FIX_AUTO') {
+        const num = text.replace(/\D/g, '');
+        const mt = db.templates[0];
+        const u = db.users[uid];
+        try {
+            await EmailEngine.send(u, num, mt);
+            db.updateStats('fixed', 1);
+            ctx.reply(`✅ Terkirim!\nTarget: ${num}`);
+            userStates.delete(uid);
+        } catch (e) { ctx.reply(`❌ Gagal: ${e.message}`); }
+    } else if (state === 'FIX_MAN') {
+        const num = text.replace(/\D/g, '');
+        const name = RANDOM_NAMES[Math.floor(Math.random() * RANDOM_NAMES.length)];
+        const msg = APPEAL_MESSAGES[Math.floor(Math.random() * APPEAL_MESSAGES.length)].replace('{nomor}', num);
+        ctx.reply(`📝 *Nama:* ${name}\n\n${msg}`, { parse_mode: 'Markdown' });
+        userStates.delete(uid);
+    }
+
+    else if (state === 'CEK_MAN' || (state === 'CEK_FILE' && ctx.message.document) || state === 'CEK_REPE') {
+        let nums = [];
+        if (ctx.message.document) {
+            try {
+                const link = await bot.telegram.getFileLink(ctx.message.document.file_id);
+                const res = await axios.get(link.href, { responseType: 'arraybuffer' });
+                nums = await FileHandler.process(res.data, ctx.message.document.file_name);
+            } catch (e) { return ctx.reply(`❌ Gagal baca file: ${e.message}`); }
+        } else {
+            nums = text.split(/[\s,\n]+/).map(n => n.replace(/\D/g, '')).filter(n => n.length > 5);
         }
+
+        if (state === 'CEK_REPE') nums = nums.filter(n => isRepeNumber(n));
+        if (nums.length === 0) return ctx.reply('No valid numbers.');
         
-        await ctx.reply('═══════════[ 𝙈𝙀𝙉𝙐 𝙐𝙏𝘼𝙈𝘼 ]═══════════\nSilakan pilih fitur:', {
-            reply_markup: { inline_keyboard: buttons }
-        });
-    } catch (e) { console.log(e); }
-});
-
-// Menu Cek Bio
-bot.action('menu_cek', async (ctx) => {
-    const text = `🔍 *MENU CEK WHATSAPP*\n\n` +
-    `1. *Cek Manual (Batch)*\n` +
-    `   Ketik: \`/cekbio <nomor1> <nomor2> ...\`\n\n` +
-    `2. *Cek via File*\n` +
-    `   Kirim file (.txt/.csv/.xlsx) berisi nomor, lalu reply file tersebut dengan: \`/cekbiofile\`\n\n` +
-    `3. *Cek Status Terdaftar*\n` +
-    `   Ketik: \`/ceknomorterdaftar <nomor>\``;
-    
-    await ctx.editMessageText(text, {
-        parse_mode: 'Markdown',
-        reply_markup: {
-            inline_keyboard: [[Markup.button.callback('🔙 Kembali', 'back_to_menu')]]
-        }
-    });
-});
-
-// Menu Fix
-bot.action('menu_fix', async (ctx) => {
-    const text = `🔧 *MENU FIX & BANDING*\n\n` +
-    `1. *Kirim Banding (Fix)*\n` +
-    `   Ketik: \`/fix <nomor_whatsapp>\`\n` +
-    `   _Mengirim email banding otomatis menggunakan template aktif._\n\n` +
-    `2. *Generate Teks Banding*\n` +
-    `   Ketik: \`/banding <nomor_whatsapp>\`\n` +
-    `   _Hanya membuatkan kata-kata banding._`;
-    
-    await ctx.editMessageText(text, {
-        parse_mode: 'Markdown',
-        reply_markup: {
-            inline_keyboard: [[Markup.button.callback('🔙 Kembali', 'back_to_menu')]]
-        }
-    });
-});
-
-// Menu Setup MT (FITUR BARU YANG DIMINTA)
-bot.action('menu_setup_mt', async (ctx) => {
-    if (!isOwner(ctx.from.id) && !isAdmin(ctx.from.id)) return ctx.answerCbQuery('Akses Ditolak');
-    
-    const text = `⚙️ *SETUP TEMPLATE EMAIL (MT)*\n\n` +
-    `Gunakan format berikut untuk menambah template baru:\n\n` +
-    `1. *Tambah Template:*\n` +
-    `   \`/setmt <email_tujuan> | <subjek> | <isi_pesan>\`\n` +
-    `   _Wajib gunakan {nomor} di dalam isi pesan untuk otomatis diganti nomor target._\n\n` +
-    `2. *Lihat Daftar Template:*\n` +
-    `   \`/listmt\`\n\n` +
-    `3. *Set Template Aktif:*\n` +
-    `   \`/setactivemt <id_mt>\``;
-    
-    await ctx.editMessageText(text, {
-        parse_mode: 'Markdown',
-        reply_markup: {
-            inline_keyboard: [[Markup.button.callback('🔙 Kembali', 'back_to_menu')]]
-        }
-    });
-});
-
-// Menu Admin
-bot.action('menu_admin', async (ctx) => {
-    if (!isOwner(ctx.from.id) && !isAdmin(ctx.from.id)) return ctx.answerCbQuery('Akses Ditolak');
-
-    const text = `👥 *MENU ADMIN & OWNER*\n\n` +
-    `*Kacung (User Allowed):*\n` +
-    `• /addkacung <id> - Tambah user\n` +
-    `• /addkacungall <id1> <id2>... - Tambah banyak\n` +
-    `• /listkacungid - Lihat daftar\n` +
-    `• /delkacung <id> - Hapus user (Owner)\n\n` +
-    `*Admin:*\n` +
-    `• /addadmin <id> - Tambah admin (Owner)\n` +
-    `• /unadmin <id> - Hapus admin (Owner)\n\n` +
-    `*Bot:* \n` +
-    `• /getqr - Scan QR WhatsApp (Owner)\n` +
-    `• /wastatus - Cek koneksi`;
-    
-    await ctx.editMessageText(text, {
-        parse_mode: 'Markdown',
-        reply_markup: {
-            inline_keyboard: [[Markup.button.callback('🔙 Kembali', 'back_to_menu')]]
-        }
-    });
-});
-
-// Menu Range & Repe
-bot.action('menu_range', async (ctx) => {
-    const text = `📊 *CEK RANGE*\n\n` +
-    `Format: \`/cekrange <prefix> <start> <end>\`\n` +
-    `Contoh: \`/cekrange 628 1000 1050\``;
-    
-    await ctx.editMessageText(text, {
-        parse_mode: 'Markdown',
-        reply_markup: {
-            inline_keyboard: [[Markup.button.callback('🔙 Kembali', 'back_to_menu')]]
-        }
-    });
-});
-
-bot.action('menu_repe', async (ctx) => {
-    const text = `🔢 *CEK NOMOR CANTIK (REPE)*\n\n` +
-    `Format: \`/cekrepe <nomor1> <nomor2> ...\`\n` +
-    `Mengecek apakah nomor tersebut cantik/repe dan status pendaftarannya.`;
-    
-    await ctx.editMessageText(text, {
-        parse_mode: 'Markdown',
-        reply_markup: {
-            inline_keyboard: [[Markup.button.callback('🔙 Kembali', 'back_to_menu')]]
-        }
-    });
-});
-
-bot.action('check_verification', async (ctx) => {
-  const userId = ctx.from.id;
-  try {
-    const chatMember = await ctx.telegram.getChatMember(VERIFICATION_GROUP_ID, userId);
-    if (['member', 'administrator', 'creator'].includes(chatMember.status)) {
-      if (!allowedIds.includes(userId)) {
-        allowedIds.push(userId);
-        saveAllowed();
-        await ctx.reply('✅ Verifikasi berhasil! Klik /start lagi.');
-      } else {
-        await ctx.reply('✅ Kamu sudah terverifikasi sebelumnya.');
-      }
-    } else {
-      await ctx.reply('❌ Kamu belum join grup verifikasi.');
+        const sock = userSessions.get(uid);
+        if(!sock) return ctx.reply('❌ WA Belum Konek.');
+        processBatchCheck(ctx, nums, sock);
+        userStates.delete(uid);
     }
-  } catch (error) {
-    await ctx.reply('❌ Gagal memverifikasi.');
-  }
-});
 
-// ========== COMMANDS LAMA (LOGIC TETAP ADA) ==========
-// Command getqr, getpairing, dll tetap berfungsi normal.
-
-bot.command('getqr', async (ctx) => {
-  if (!isOwner(ctx.message.from.id)) return ctx.reply('❌ Owner only.');
-  if (isWhatsAppConnected) return ctx.reply('✅ WhatsApp sudah terhubung.');
-  if (!qrCodeString) return ctx.reply('❌ QR Code belum tersedia, tunggu sebentar.');
-
-  try {
-    const qrImage = await qrcode.toBuffer(qrCodeString);
-    await ctx.replyWithPhoto({ source: qrImage }, { caption: '📱 Scan QR ini di WhatsApp Linked Devices' });
-  } catch (e) { ctx.reply('Gagal generate QR'); }
-});
-
-bot.command('getpairing', async (ctx) => {
-    if (!isOwner(ctx.message.from.id)) return;
-    if (!whatsappSock) return ctx.reply('WA belum siap');
-    const num = ctx.message.text.split(' ')[1];
-    if(!num) return ctx.reply('Format: /getpairing 62xxx');
-    try {
-        const code = await whatsappSock.requestPairingCode(num);
-        ctx.reply(`Kode Pairing: ${code}`);
-    } catch(e) { ctx.reply('Gagal request pairing'); }
-});
-
-// Command Fix (Perbaikan Markdown Error)
-bot.command('fix', async (ctx) => {
-  const userId = ctx.message.from.id;
-  const username = ctx.message.from.username || ctx.message.from.first_name;
-  
-  if (!isAllowed(userId)) return ctx.reply('❌ Belum verifikasi.');
-
-  const cooldown = checkCooldown(userId);
-  if (!cooldown.allowed) return ctx.reply(`⏰ Tunggu ${cooldown.remaining} detik.`);
-
-  const args = ctx.message.text.replace('/fix', '').trim().split(/\s+/);
-  if (!args[0]) return ctx.reply('❌ Format: `/fix <nomor whatsapp>`\nContoh: `/fix +628123456789`', { parse_mode: 'Markdown' });
-
-  let number = args[0].replace(/[^0-9+]/g, '');
-  if (number.startsWith('0')) number = '62' + number.substring(1);
-  else if (number.startsWith('8')) number = '62' + number;
-
-  const user = getUser(userId);
-  if (!isAdmin(userId) && user.fix_limit <= 0) return ctx.reply('❌ Limit habis.');
-
-  const activeTemplate = getActiveMt();
-  if (!activeTemplate) return ctx.reply('❌ Tidak ada template MT aktif.');
-
-  try {
-    const transporter = setupTransporter();
-    const body = activeTemplate.body.replace(/{nomor}/g, number);
-    
-    await transporter.sendMail({
-      from: transporter.options.auth.user,
-      to: activeTemplate.to_email,
-      subject: activeTemplate.subject,
-      text: body
-    });
-    
-    if (!isAdmin(userId)) {
-      user.fix_limit -= 1;
-      user.last_fix = Date.now();
-      saveUser(user);
+    else if (state === 'CEK_RANGE') {
+        const args = text.split(/\s+/);
+        if(args.length < 3) return ctx.reply('Format: Prefix Start End');
+        const [prefix, start, end] = args;
+        let nums = [];
+        for(let i=parseInt(start); i<=parseInt(end); i++) nums.push(prefix + i);
+        const sock = userSessions.get(uid);
+        if(!sock) return ctx.reply('❌ WA Belum Konek.');
+        processBatchCheck(ctx, nums, sock);
+        userStates.delete(uid);
     }
-    
-    saveHistory({ user_id: userId, username, command: `/fix ${number}`, details: 'Success' });
-    await ctx.reply(`✅ Email terkirim untuk nomor ${number}.\nSisa limit: ${user.fix_limit}`);
 
-  } catch (error) {
-    console.error(error);
-    await ctx.reply(`❌ Gagal kirim email: ${error.message}`);
-  }
+    else if (state === 'ADM_TIME_ID') {
+        tempStorage.set(uid, { tid: text });
+        userStates.set(uid, 'ADM_TIME_D');
+        ctx.reply('Jumlah Hari?');
+    } else if (state === 'ADM_TIME_D') {
+        const u = db.users[tempStorage.get(uid).tid];
+        if (u) {
+            u.expired += parseInt(text) * 86400000;
+            db.updateUser(u.id, u);
+            ctx.reply('✅ Sukses.');
+        } else ctx.reply('User not found.');
+        userStates.delete(uid);
+        UI.menu(ctx);
+    }
 });
 
-// Command Setup MT (Admin/Owner)
-bot.command('setmt', async (ctx) => {
-  if (!isOwner(ctx.message.from.id)) return;
-  const parts = ctx.message.text.replace('/setmt', '').trim().split('|').map(p => p.trim());
-  if (parts.length < 3) return ctx.reply('❌ Format: /setmt email | subjek | pesan {nomor}');
-  
-  const mtTexts = getMtTexts();
-  const newId = mtTexts.length > 0 ? mtTexts[mtTexts.length - 1].id + 1 : 1;
-  mtTexts.push({ id: newId, to_email: parts[0], subject: parts[1], body: parts[2] });
-  writeDb(MT_FILE, mtTexts);
-  ctx.reply(`✅ MT ID ${newId} tersimpan.`);
-});
+async function processBatchCheck(ctx, nums, sock) {
+    const msg = await ctx.reply(`⏳ Checking ${nums.length} numbers...`);
+    let business = [], original = [], invalid = [];
 
-bot.command('setactivemt', async (ctx) => {
-    if (!isOwner(ctx.message.from.id)) return;
-    const id = parseInt(ctx.message.text.split(' ')[1]);
-    if(isNaN(id)) return ctx.reply('Format: /setactivemt <id>');
-    const settings = readDb(SETTINGS_DB);
-    settings.active_mt_id = id;
-    writeDb(SETTINGS_DB, settings);
-    ctx.reply(`✅ MT ID ${id} diaktifkan.`);
-});
+    for (let i = 0; i < nums.length; i += 50) {
+        const batch = nums.slice(i, i + 50);
+        await Promise.all(batch.map(async (n) => {
+            const num = n.startsWith('0') ? '62' + n.slice(1) : n;
+            try {
+                const jid = num + '@s.whatsapp.net';
+                const [res] = await sock.onWhatsApp(jid);
+                if (res?.exists) {
+                    let bio = '-', type = 'whatsapp original';
+                    try { const s = await sock.fetchStatus(jid); bio = s?.status || '-'; } catch {}
+                    try { if (await sock.getBusinessProfile(jid)) type = 'whatsapp business'; } catch {}
+                    const data = { number: num, bio, type };
+                    if (type === 'whatsapp business') business.push(data); else original.push(data);
+                } else { invalid.push(num); }
+            } catch { invalid.push(num); }
+        }));
+        await delay(1000);
+    }
 
-bot.command('listmt', async (ctx) => {
-    if (!isOwner(ctx.message.from.id)) return;
-    const list = getMtTexts().map(m => `ID: ${m.id} | Subjek: ${m.subject}`).join('\n');
-    ctx.reply(list || 'Kosong');
-});
+    let content = `LAPORAN CEK BIO (Total: ${nums.length})\n\n`;
+    if (business.length > 0) {
+        content += `whatsapp business\n`;
+        business.forEach(r => content += `|--- ${r.number}\n|--- Bio: ${r.bio}\n|--- Verifikasi Meta: Yes\n\n`);
+    }
+    if (original.length > 0) {
+        content += `whatsapp original\n`;
+        original.forEach(r => content += `|--- ${r.number}\n|--- Bio: ${r.bio}\n|--- Verifikasi Meta: No\n\n`);
+    }
+    if (invalid.length > 0) {
+        content += `whatsapp number ampas\n---- Tidak Terdaftar ----\n`;
+        invalid.forEach(n => content += `${n}\n`);
+    }
 
-// Command Cek Bio, Cek File, dll (Sama seperti sebelumnya, disingkat untuk efisiensi baris)
-// Pastikan file config.js ada dan sesuai.
-
-bot.command('cekbio', async (ctx) => {
-    // Logic sama persis dengan yang lama, hanya pastikan imports aman
-    // ... (gunakan logic asli Anda di sini untuk cekbio)
-    // Untuk mempersingkat jawaban agar muat, saya asumsikan logic cekbio Anda sudah jalan
-    // Intinya adalah logic looping dan check waSocket.fetchStatus
-    ctx.reply('Fitur Cek Bio berjalan... (Pastikan logic asli tetap ada di sini)');
-});
-
-// Admin management commands
-bot.command('addkacung', async (ctx) => {
-    if (!isAdmin(ctx.message.from.id)) return;
-    const id = parseInt(ctx.message.text.split(' ')[1]);
-    if(id) { allowedIds.push(id); saveAllowed(); ctx.reply('Added.'); }
-});
-
-bot.command('listkacungid', async (ctx) => {
-    if (!isAdmin(ctx.message.from.id)) return;
-    ctx.reply(`Total: ${allowedIds.length}\n${allowedIds.join(', ')}`);
-});
-
-bot.catch((err) => console.log('Telegram Error:', err));
-
-// Start All
-async function startAll() {
-  console.log('🚀 Starting Bot...');
-  initAllDb();
-  loadData();
-  startWhatsApp().catch(e => console.log(e));
-  await bot.launch();
-  console.log('✅ Telegram Bot Started');
+    const f = `Result_${Date.now()}.txt`;
+    fs.writeFileSync(f, content);
+    await ctx.replyWithDocument({ source: f }, { caption: `✅ Selesai` });
+    fs.unlinkSync(f);
+    try { await ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id); } catch {}
 }
 
-// Graceful Shutdown
-process.once('SIGINT', () => { bot.stop(); if(whatsappSock) whatsappSock.end(); });
-process.once('SIGTERM', () => { bot.stop(); if(whatsappSock) whatsappSock.end(); });
+(async () => {
+    console.log('🚀 Starting V38 Ultimate...');
+    await WAManager.loadAll();
+    await bot.launch();
+    console.log('✅ Bot Online');
+})();
 
-startAll();
+process.once('SIGINT', () => bot.stop());
+process.once('SIGTERM', () => bot.stop());
