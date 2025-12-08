@@ -14,7 +14,7 @@ const CONFIG = {
     ownerId: '7732520601',
     groupLink: 'https://t.me/stockwalzy',
     groupId: '-1003325663954',
-    botImage: 'https://files.catbox.moe/hrtpys.jpg',
+    botImage: 'https://files.catbox.moe/kjfe0d.jpg',
     dbPath: './database',
     trialDuration: 86400000,
     batchSize: 50,
@@ -37,7 +37,7 @@ class Database {
             admins: path.join(CONFIG.dbPath, 'admins.json'),
             allowed: path.join(CONFIG.dbPath, 'allowed.json'),
             templates: path.join(CONFIG.dbPath, 'templates.json'),
-            stats: path.join(CONFIG.dbPath, 'stats.json')
+            history: path.join(CONFIG.dbPath, 'history.json')
         };
         this.init();
     }
@@ -48,7 +48,7 @@ class Database {
             admins: [String(CONFIG.ownerId)],
             allowed: [],
             templates: [{ id: 1, subject: "Masalah Login", body: "Halo Tim WA, nomor {nomor} bermasalah." }],
-            stats: { checked: 0, fixed: 0 }
+            history: []
         };
         for (const [key, p] of Object.entries(this.paths)) {
             if (!fs.existsSync(p)) fs.writeFileSync(p, JSON.stringify(defaults[key], null, 2));
@@ -58,18 +58,24 @@ class Database {
     get(key) { try { return JSON.parse(fs.readFileSync(this.paths[key], 'utf8')); } catch { return null; } }
     set(key, data) { fs.writeFileSync(this.paths[key], JSON.stringify(data, null, 2)); }
 
-    get users() { return this.get('users') || {}; }
-    get admins() { return this.get('admins') || []; }
-    get allowed() { return this.get('allowed') || []; }
-    get templates() { return this.get('templates') || []; }
-    get stats() { return this.get('stats') || { checked: 0, fixed: 0 }; }
+    get users() { return this.get('users'); }
+    get admins() { return this.get('admins'); }
+    get allowed() { return this.get('allowed'); }
+    get templates() { return this.get('templates'); }
+    get history() { return this.get('history'); }
 
     updateUser(id, data) {
         const u = this.users;
-        u[id] = { ...(u[id] || {}), ...data };
+        u[id] = { ...u[id], ...data };
         this.set('users', u);
     }
-    updateStats(key, val) { const s = this.stats; s[key] += val; this.set('stats', s); }
+
+    saveHistory(data) {
+        const hist = this.history;
+        const newId = hist.length > 0 ? hist[hist.length - 1].id + 1 : 1;
+        hist.push({ id: newId, ...data, timestamp: new Date().toISOString() });
+        this.set('history', hist);
+    }
 }
 
 const db = new Database();
@@ -203,8 +209,6 @@ const EmailEngine = {
 const checkAuth = async (ctx) => {
     const uid = String(ctx.from.id);
     let user = db.users[uid];
-    
-    // Auto Register jika user null
     if (!user) {
         user = { 
             id: uid, username: ctx.from.username || 'User', 
@@ -247,35 +251,20 @@ const UI = {
     },
     async menu(ctx) {
         const uid = String(ctx.from.id);
-        let u = db.users[uid];
-
-        // ANTI CRASH: Re-create user if missing
-        if (!u) {
-            u = { 
-                id: uid, username: ctx.from.username || 'User', 
-                joined: Date.now(), expired: Date.now() + CONFIG.trialDuration,
-                email: null, emailPass: null, sessionActive: false 
-            };
-            db.updateUser(uid, u);
-        }
-
+        const u = db.users[uid];
         const isOwner = uid === CONFIG.ownerId;
         const isAdmin = db.admins.includes(uid);
         const role = isOwner ? 'Owner' : (isAdmin ? 'Admin' : 'User');
         const status = Date.now() > u.expired ? '🔴 Expired' : '🟢 Active';
         
-        // Status WA & Email
-        const hasEmail = u.email ? '✅' : '❌';
-        const hasWA = userSessions.has(uid) && userSessions.get(uid)?.user ? '✅' : '❌';
-        
         let text = `╭───── ⧼ 𝑰 𝒏 𝒇 𝒐 - 𝑩 𝒐 𝒕 𝒔 ⧽
-│🤖 𝐁𝐨𝐭 : Whatsapp Master V38
+│🤖 𝐁𝐨𝐭 : Whatsapp Master V36
 │👤 𝐑𝐨𝐥𝐞 : ${role}
 │🎫 𝐒𝐭𝐚𝐭𝐮𝐬 : ${status}
 ╰─────
 ╭───── ⧼ 𝑺 𝒕 𝒂 𝒕 𝒖 𝒔 - 𝑼 𝒔 𝒆 𝒓 ⧽
-┃ 📧 Email: ${hasEmail}
-┃ 📱 WA: ${hasWA}
+┃ 📧 Email: ${u.email ? '✅' : '❌'}
+┃ 📱 WA: ${userSessions.has(uid) ? '✅' : '❌'}
 ╰─────
  ═══════════[ 𝙈𝙀𝙉𝙐 ]═══════════\n`;
 
@@ -360,7 +349,7 @@ bot.on('message', async (ctx) => {
         const u = db.users[uid];
         try {
             await EmailEngine.send(u, num, mt);
-            db.updateStats('fixed', 1);
+            db.saveHistory({ userId: uid, action: 'FIX', target: num, status: 'SUCCESS' });
             ctx.reply(`✅ Terkirim!\nTarget: ${num}`);
             userStates.delete(uid);
         } catch (e) { ctx.reply(`❌ Gagal: ${e.message}`); }
@@ -444,6 +433,8 @@ async function processBatchCheck(ctx, nums, sock) {
         await delay(1000);
     }
 
+    db.updateStats('checked', nums.length);
+
     let content = `LAPORAN CEK BIO (Total: ${nums.length})\n\n`;
     if (business.length > 0) {
         content += `whatsapp business\n`;
@@ -466,7 +457,7 @@ async function processBatchCheck(ctx, nums, sock) {
 }
 
 (async () => {
-    console.log('🚀 Starting V38 Ultimate...');
+    console.log('🚀 Starting V36 Complete...');
     await WAManager.loadAll();
     await bot.launch();
     console.log('✅ Bot Online');
