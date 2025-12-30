@@ -8,11 +8,11 @@ import path from 'path';
 import XLSX from 'xlsx';
 
 const CONFIG = {
-    botToken: '8250992727:AAG2XlCefa-XZPLw9KlaexgnPI0bx-nZ6uE',
-    ownerId: '7732520601',
-    adminUserName: 'walzdevnew',
-    groupLink: 'https://t.me/stockwalzy',
-    groupId: '-1003325663954',
+    botToken: '8182701764:AAFZnFZQwn4aAV3Gowh5eGZ43ogG2V4swJk',
+    ownerId: '7650101390',
+    adminUserName: 'walzyexploit',
+    groupLink: 'https://t.me/stockwalzyy',
+    groupId: '-1003675929763',
     botImage: 'https://files.catbox.moe/kjfe0d.jpg',
     dbPath: './database',
     batchSize: 50,
@@ -281,7 +281,8 @@ const MENUS = {
         keyboard: [
             [{ text: '🚀 PERBAIKI WA' }, { text: '🔎 CEK BIO NOMOR' }],
             [{ text: '⚙️ PENGATURAN' }, { text: '👤 PROFIL SAYA' }],
-            [{ text: '📂 KONVERSI FILE' }, { text: '❓ BANTUAN' }]
+            [{ text: '📂 KONVERSI FILE' }, { text: '🛒 BELI SCRIPT' }],
+            [{ text: '❓ BANTUAN' }]
         ],
         resize_keyboard: true
     },
@@ -377,14 +378,6 @@ function formatDate(ms) {
     return new Date(ms).toLocaleDateString('id-ID');
 }
 
-function formatTimestamp(timestamp) {
-    if (!timestamp || timestamp === 0) {
-        return '-';
-    }
-    const ms = String(timestamp).length === 10 ? timestamp * 1000 : timestamp;
-    return new Date(ms).toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
-}
-
 function maskEmail(email) {
     const parts = email.split('@');
     if (parts.length !== 2) {
@@ -460,12 +453,8 @@ const WAManager = {
         sock.ev.on("connection.update", async (update) => {
             const { connection, lastDisconnect } = update;
             if (connection === "open") {
-                const lastStatus = sessionStatus.get(sessionKey);
-                if (lastStatus !== 'open') {
-                    sessionStatus.set(sessionKey, 'open');
-                    sock.user = { id: sock.user?.id || 'unknown' };
-                    try { await bot.telegram.sendMessage(uid, `✅ <b>Koneksi Stabil!</b>\nSesi WhatsApp ke-${sessionId} siap digunakan.`, { parse_mode: 'HTML' }); } catch { }
-                }
+                sessionStatus.set(sessionKey, 'open');
+                sock.user = { id: sock.user?.id || 'unknown' };
             } else if (connection === "close") {
                 sessionStatus.set(sessionKey, 'close');
                 if (userSessions.has(uid)) {
@@ -1145,6 +1134,34 @@ bot.on(['text', 'photo', 'video'], async (ctx) => {
             userStates.set(uid, 'CONVERT_XLSX');
             ctx.reply('📂 Kirim file Excel/Txt untuk dibersihkan (ambil nomor saja).', { reply_markup: MENUS.cancel });
             break;
+        case '🛒 BELI SCRIPT':
+            const priceList = `
+╭─── [ 💸 𝗣𝗥𝗜𝗖𝗘 𝗟𝗜𝗦𝗧 𝗦𝗖𝗥𝗜𝗣𝗧 ] ───╮
+│
+│ 📦 𝗣𝗔𝗞𝗘𝗧 𝗛𝗘𝗠𝗔𝗧 (𝟭𝟬𝗞)
+│ ├─ ✅ Full Fitur V89
+│ ├─ ❌ Tidak Dapat Update
+│ ├─ ❌ Support Basic
+│ ╰────────────────────
+│
+│ 💎 𝗣𝗔𝗞𝗘𝗧 𝗦𝗨𝗟𝗧𝗔𝗡 (𝟭𝟱𝗞)
+│ ├─ ✅ Full Fitur V89
+│ ├─ ✅ 𝗚𝗥𝗔𝗧𝗜𝗦 𝗨𝗣𝗗𝗔𝗧𝗘 Seterusnya
+│ ├─ ✅ Prioritas Support / Install
+│ ╰────────────────────
+│
+│ 💳 𝗣𝗲𝗺𝗯𝗮𝘆𝗮𝗿𝗮𝗻: Dana / Gopay / QRIS
+╰──────────────────────────────╯
+`;
+            ctx.reply(priceList, { 
+                parse_mode: 'HTML', 
+                reply_markup: {
+                    inline_keyboard: [
+                        [{ text: '👨‍💻 Chat Owner (Beli Sekarang)', url: `https://t.me/${CONFIG.adminUserName}` }]
+                    ]
+                }
+            });
+            break;
         case '❓ BANTUAN':
             const guide = `
 <b>📖 PANDUAN PENGGUNAAN WALZY BOT</b>
@@ -1236,11 +1253,8 @@ async function processBatchCheck(ctx, nums, uid) {
     let activeSockets = allSockets.filter(s => s.user); 
     
     if (activeSockets.length === 0) {
-        if(allSockets.length > 0) {
-            activeSockets = allSockets;
-        } else {
-            throw new Error('Semua sesi WA terputus/banned.');
-        }
+        if(allSockets.length > 0) activeSockets = allSockets;
+        else throw new Error('Semua sesi WA terputus/banned.');
     }
 
     let results = [];
@@ -1248,9 +1262,8 @@ async function processBatchCheck(ctx, nums, uid) {
 
     const formatDateIndo = (dateObj) => {
         if (!dateObj) return '-';
-        try {
-            return new Date(dateObj).toLocaleDateString('id-ID', { day: '2-digit', month: '2-digit', year: 'numeric' });
-        } catch (e) { return '-'; }
+        try { return new Date(dateObj).toLocaleDateString('id-ID', { day: '2-digit', month: '2-digit', year: 'numeric' }); } 
+        catch (e) { return '-'; }
     };
 
     const fetchUSync = async (sock, jid) => {
@@ -1259,10 +1272,7 @@ async function processBatchCheck(ctx, nums, uid) {
             const usyncQuery = new USyncQuery().withContext('interactive').withStatusProtocol().withUser(new USyncUser().withId(jid));
             const result = await sock.executeUSyncQuery(usyncQuery);
             if (result?.list?.[0]?.status) {
-                return {
-                    status: result.list[0].status.status,
-                    setAt: result.list[0].status.setAt
-                };
+                return { status: result.list[0].status.status, setAt: result.list[0].status.setAt };
             }
         } catch (e) { }
         return null;
@@ -1288,18 +1298,15 @@ async function processBatchCheck(ctx, nums, uid) {
                         let bioContent = "Bio Kosong / Privasi"; 
                         let bioDate = "-";
                         let rawDate = 0;
-                        let type = "Pribadi";
+                        let type = "PRIBADI";
+                        let metaStatus = "NONE";
 
                         try {
                             await sock.presenceSubscribe(jid);
                             await sock.profilePictureUrl(jid, 'image').catch(() => {});
-                            await sock.sendPresenceUpdate('composing', jid);
-                            await delay(3500); 
-                            await sock.sendPresenceUpdate('paused', jid);
                         } catch (e) {}
 
                         let statusData = await fetchUSync(sock, jid);
-                        
                         if (!statusData) {
                             try {
                                 const classic = await sock.fetchStatus(jid);
@@ -1318,21 +1325,33 @@ async function processBatchCheck(ctx, nums, uid) {
                         try {
                             const biz = await sock.getBusinessProfile(jid);
                             if (biz) {
-                                type = "Bisnis";
+                                const isHighLevel = (biz.verifiedLevel >= 2 || biz.verifiedLevel === 'high' || biz.verifiedLevel === 'very_high');
+                                const hasVerifiedName = (biz.verifiedName && biz.verifiedName.length > 0 && biz.verifiedName !== biz.pushName);
+
+                                if (isHighLevel || hasVerifiedName) {
+                                    type = "BISNIS (META VERIFIED)";
+                                    metaStatus = "VERIFIED";
+                                } else {
+                                    type = "BISNIS (PROSPEK META)";
+                                    metaStatus = "CANDIDATE";
+                                }
+
                                 if (biz.description && (bioContent === "Bio Kosong / Privasi")) {
                                     bioContent = biz.description;
                                     bioDate = "Deskripsi Bisnis";
                                     rawDate = 9999999999999;
                                 }
                             }
-                        } catch (e) { }
+                        } catch (e) {
+                        }
 
                         results.push({ 
                             num: cleanNum, 
                             type: type, 
+                            metaStatus: metaStatus,
                             date: bioDate, 
                             rawDate: rawDate,
-                            bio: bioContent.replace(/[\r\n]+/g, ' ').trim() 
+                            bio: bioContent.replace(/[\r\n]+/g, ' ').trim()
                         });
                     } else {
                         invalid.push(cleanNum);
@@ -1344,8 +1363,7 @@ async function processBatchCheck(ctx, nums, uid) {
                         if(activeSockets.length === 0) throw new Error("Semua sesi mati.");
                         sock = getRandomSocket();
                     } else {
-                        invalid.push(cleanNum);
-                        success = true;
+                        success = true; 
                     }
                 }
                 attempts++;
@@ -1360,53 +1378,82 @@ async function processBatchCheck(ctx, nums, uid) {
     const noDateResults = results.filter(r => r.rawDate === 0);
     const finalSorted = [...validResults, ...noDateResults];
 
-    let content = `HASIL CEK BIO WALZY\nTanggal Scan: ${new Date().toLocaleString('id-ID')}\n\n`;
+    const listVerified = finalSorted.filter(r => r.metaStatus === "VERIFIED");
+    const listFiturMeta = finalSorted.filter(r => r.metaStatus === "CANDIDATE");
+    const listBiz = finalSorted.filter(r => r.type.toUpperCase().includes('BISNIS') && r.metaStatus !== "VERIFIED" && r.metaStatus !== "CANDIDATE");
+    const listPers = finalSorted.filter(r => r.type.toUpperCase().includes('PRIBADI'));
 
-    finalSorted.forEach(r => {
-        content += `╭── 👤 ${r.num}\n`;
-        content += `│ 🏷️ Tipe   : ${r.type.toUpperCase()}\n`;
-        content += `│ 📅 Tanggal: ${r.date}\n`;
-        content += `│ 📝 Bio    : ${r.bio}\n`;
-        content += `╰───────────────────────────\n`;
-    });
+    let content = `WALZY INTELLIGENCE V91\n`;
+    content += `Scan: ${new Date().toLocaleString('id-ID')}\n`;
+    content += `Data: ${results.length} Valid Numbers\n\n`;
+
+    const addSection = (title, list) => {
+        if (list.length === 0) return;
+        
+        content += `>>> ${title} (${list.length})\n`;
+        content += `──────────────────────────────\n`;
+        
+        list.forEach(r => {
+            let labelTipe = "PRIBADI 👤";
+            if (r.metaStatus === "VERIFIED") labelTipe = "SUDAH CENTANG BIRU ✅";
+            else if (r.metaStatus === "CANDIDATE") labelTipe = "FITUR VERIF META (BELUM BELI) 💼";
+            else if (r.type.toUpperCase().includes("BISNIS")) labelTipe = "BUSINESS ACCOUNT 🏢";
+
+            let displayBio = r.bio;
+            if (!displayBio || displayBio.trim() === "") displayBio = "TIDAK ADA BIO / PRIVATE";
+
+            content += `╭── 👤 ${r.num}\n`;
+            content += `│ 🏷️ ${labelTipe}\n`;
+            content += `│ 📅 ${r.date}\n`;
+            content += `│ 📝 ${displayBio}\n`;
+            content += `╰───────────────────────────\n`;
+        });
+        content += `\n`;
+    };
+
+    addSection("LIST SUDAH CENTANG BIRU", listVerified);
+    addSection("LIST ADA FITUR VERIFIKASI META", listFiturMeta);
+    addSection("LIST WHATSAPP BUSINESS BIASA", listBiz);
+    addSection("LIST WHATSAPP PRIBADI", listPers);
 
     if (invalid.length > 0) {
-        content += `\n=== ❌ NOMOR INVALID / TIDAK TERDAFTAR ===\n`;
-        content += invalid.join('\n');
+        content += `>>> INVALID / GAGAL (${invalid.length})\n`;
+        content += `──────────────────────────────\n`;
+        content += invalid.map(n => `❌ ${n}`).join('\n');
     }
 
     const f = `Hasil_${uid}_${Date.now()}.txt`;
     fs.writeFileSync(f, content);
 
     const total = nums.length;
-    const bizCount = results.filter(r => r.type === 'Bisnis').length;
-    const persCount = results.filter(r => r.type === 'Pribadi').length;
+    const verifiedCount = listVerified.length;
+    const fiturMetaCount = listFiturMeta.length;
+    const bizCount = listBiz.length;
+    const persCount = listPers.length;
     const hasBio = results.filter(r => r.rawDate > 0 || (r.bio !== "Bio Kosong / Privasi")).length;
     const noBio = results.length - hasBio;
-
-    let oldestYear = "-";
-    if (validResults.length > 0) {
-        oldestYear = new Date(validResults[0].rawDate).getFullYear();
-    }
+    
+    let oldestYear = validResults.length > 0 ? new Date(validResults[0].rawDate).getFullYear() : "-";
 
     const caption =
-`✅ <b>CEK SELESAI (V89 FINAL)</b>
+`⚡ <b>WALZY INTELLIGENCE V91</b>
+━━━━━━━━━━━━━━━━━━
+📊 <b>STATISTIK INPUT</b>
+├ 📁 Total Nomor : ${total}
+└ ✅ Valid WA : ${results.length}
 
-📊 <b>STATISTIK DATA</b>
-• Total Input: ${total}
-• Valid WA: ${results.length}
-• Invalid: ${invalid.length}
+😈 <b>KATEGORI AKUN</b>
+├ 🌟 <b>Centang Biru : ${verifiedCount}</b>
+├ 💼 Fitur Meta : ${fiturMetaCount}
+├ 🏢 Bisnis Biasa : ${bizCount}
+└ 👤 Akun Pribadi : ${persCount}
 
-📂 <b>DETAIL AKUN</b>
-• 🏢 Bisnis: ${bizCount}
-• 👤 Pribadi: ${persCount}
+📝 <b>INFO TAMBAHAN</b>
+├ 🟢 Ada Bio : ${hasBio}
+├ 🔴 No Bio : ${noBio}
+└ 📅 Tahun Tertua : ${oldestYear}
 
-📝 <b>STATUS BIO</b>
-• ✅ Ada Bio: ${hasBio}
-• ⚪ No Bio/Priv: ${noBio}
-• 🗓️ Tahun Tertua: <b>${oldestYear}</b>
-
-<i>File hasil telah diurutkan dari bio terlama.</i>`;
+<i>File txt sudah disusun rapi.</i>`;
 
     await ctx.replyWithDocument({ source: f }, { caption: caption, parse_mode: 'HTML' });
     fs.unlinkSync(f);
@@ -1415,7 +1462,7 @@ async function processBatchCheck(ctx, nums, uid) {
 (async () => {
     console.log('🚀 Walzy V89 FINAL Started...');
     await WAManager.loadAll();
-    await bot.launch();
+    await bot.launch({ dropPendingUpdates: true }); 
     console.log('✅ Sistem Online');
 })();
 
